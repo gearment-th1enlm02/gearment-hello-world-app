@@ -1,6 +1,7 @@
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const UserData = require("../models/UserData");
 const { jwtConfig } = require("../config");
 
 const register = async (req, res) => {
@@ -27,7 +28,21 @@ const register = async (req, res) => {
         });
         await user.save();
 
-        console.log(`${logPrefix} User created successfully for ${email}`);
+        const userData = new UserData({
+            user_id: user._id,
+            fullname: name,
+            email: email,
+            role: 'user',
+            phone: '',
+            pronouns: '',
+            bio: '',
+            github_account: '',
+            address: {},
+            avatar: '',
+        });
+        await userData.save();
+
+        console.log(`${logPrefix} User and UserData created successfully for ${email}`);
         res.status(201).json({
             user: { id: user._id, name: user.name, email: user.email, role: user.role },
             message: "User registered successfully"
