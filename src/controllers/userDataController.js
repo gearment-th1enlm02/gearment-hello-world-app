@@ -1,7 +1,11 @@
 const User = require("../models/User");
 const UserData = require("../models/UserData");
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const mongoose = require("mongoose");
 const multer = require("multer");
+
+require('dotenv').config();
 
 const s3 = new S3Client({
   credentials: {
@@ -21,8 +25,19 @@ exports.getUserData = async (req, res, next) => {
     if (!userData) {
       return res.status(404).json({ error: "User data not found" });
     }
+
+    // Tạo pre-signed URL cho avatar
+    let avatarUrl = userData.avatar;
+    if (avatarUrl) {
+      const key = avatarUrl.split('.com/')[1];
+      avatarUrl = await getSignedUrl(s3, new GetObjectCommand({
+        Bucket: process.env.S3_BUCKET_NAME,
+        Key: key,
+      }), { expiresIn: 3600 });
+    }
+
     console.log(`${logPrefix} User data retrieved for user ${user_id}`);
-    res.status(200).json(userData);
+    res.status(200).json({ ...userData, avatar: avatarUrl });
   } catch (error) {
     console.error(`${logPrefix} Error: ${error.message}`);
     next(error);
@@ -34,6 +49,11 @@ exports.updateUserData = async (req, res, next) => {
   try {
     const { user_id } = req.params;
     const updateData = req.body;
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (updateData.email && !emailRegex.test(updateData.email)) {
+      return res.status(400).json({ error: "Invalid email format" });
+    }
 
     const userData = await UserData.findOneAndUpdate(
       { user_id },
@@ -56,8 +76,17 @@ exports.updateUserData = async (req, res, next) => {
       }
     }
 
-    console.log(`${logPrefix} User data updated successfully for user ${user_id}`);
-    res.status(200).json(userData);
+    let avatarUrl = userData.avatar;
+    if (avatarUrl) {
+      const key = avatarUrl.split('.com/')[1];
+      avatarUrl = await getSignedUrl(s3, new GetObjectCommand({
+        Bucket: process.env.S3_BUCKET_NAME,
+        Key: key,
+      }), { expiresIn: 3600 });
+    }
+
+    console.log(`${logPrefix} User data updated for user ${user_id}`);
+    res.status(200).json({ ...userData.toObject(), avatar: avatarUrl });
   } catch (error) {
     console.error(`${logPrefix} Error: ${error.message}`);
     next(error);
@@ -66,24 +95,26 @@ exports.updateUserData = async (req, res, next) => {
 
 exports.deleteUserData = async (req, res, next) => {
   const logPrefix = "[deleteUserData]";
+  const session = await mongoose.startSession();
   try {
-    const { user_id } = req.params;
-
-    const userData = await UserData.findOneAndDelete({ user_id });
-    if (!userData) {
-      return res.status(404).json({ error: "User data not found" });
-    }
-
-    const user = await User.findOneAndDelete({ _id: user_id });
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    console.log(`${logPrefix} User and user data deleted successfully for user ${user_id}`);
-    res.status(200).json({ message: "User and user data deleted successfully" });
+    await session.withTransaction(async () => {
+      const { user_id } = req.params;
+      const userData = await UserData.findOneAndDelete({ user_id }, { session });
+      if (!userData) {
+        throw new Error("User data not found");
+      }
+      const user = await User.findOneAndDelete({ _id: user_id }, { session });
+      if (!user) {
+        throw new Error("User not found");
+      }
+    });
+    console.log(`${logPrefix} User and data deleted for user ${user_id}`);
+    res.status(200).json({ message: "User and data deleted successfully" });
   } catch (error) {
     console.error(`${logPrefix} Error: ${error.message}`);
-    next(error);
+    res.status(error.message.includes("not found") ? 404 : 500).json({ error: error.message });
+  } finally {
+    session.endSession();
   }
 };
 
@@ -104,17 +135,20 @@ exports.uploadAvatar = [
         Key: `${user_id}/${Date.now()}-${file.originalname}`,
         Body: file.buffer,
         ContentType: file.mimetype,
-        CacheControl: 'max-age=31536000',
+        CacheControl: "max-age=31536000",
       };
 
-      const command = new PutObjectCommand(params);
-      await s3.send(command);
+      await s3.send(new PutObjectCommand(params));
 
-      const avatarUrl = `https://${process.env.S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${params.Key}`;
+      const avatarUrl = await getSignedUrl(s3, new GetObjectCommand({
+        Bucket: params.Bucket,
+        Key: params.Key,
+      }), { expiresIn: 3600 });
 
+      const originalUrl = `https://${process.env.S3_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${params.Key}`;
       const userData = await UserData.findOneAndUpdate(
         { user_id },
-        { avatar: avatarUrl, updatedAt: Date.now() },
+        { avatar: originalUrl, updatedAt: Date.now() },
         { new: true, runValidators: true }
       );
 
@@ -122,7 +156,7 @@ exports.uploadAvatar = [
         return res.status(404).json({ error: "User data not found" });
       }
 
-      console.log(`${logPrefix} Avatar uploaded successfully for user ${user_id}`);
+      console.log(`${logPrefix} Avatar uploaded for user ${user_id}`);
       res.status(200).json({ url: avatarUrl });
     } catch (error) {
       console.error(`${logPrefix} Error: ${error.message}`);
