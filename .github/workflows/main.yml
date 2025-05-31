@@ -1,0 +1,31 @@
+name: Build and Deploy Docker Image
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t th1enlm02/gearment-hello-world-app:latest .
+
+      - name: Login to Docker Hub
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u th1enlm02 --password-stdin
+
+      - name: Push Docker image
+        run: |
+          docker push th1enlm02/gearment-hello-world-app:latest
+
+      - name: Deploy to EC2
+        run: |
+          cd /home/ubuntu/app
+          docker-compose pull gearment-app
+          docker-compose up -d gearment-app
